@@ -1,110 +1,278 @@
-<?php namespace Illuminate\Redis;
+<?php
 
-use Illuminate\Support\Manager;
+namespace Illuminate\Redis;
 
-class RedisManager {
+use Closure;
+use Illuminate\Contracts\Redis\Factory;
+use Illuminate\Redis\Connections\Connection;
+use Illuminate\Redis\Connectors\PhpRedisConnector;
+use Illuminate\Redis\Connectors\PredisConnector;
+use Illuminate\Support\Arr;
+use Illuminate\Support\ConfigurationUrlParser;
+use InvalidArgumentException;
 
-	/**
-	 * The application instance.
-	 *
-	 * @var Illuminate\Foundation\Application
-	 */
-	protected $app;
+/**
+ * @mixin \Illuminate\Redis\Connections\Connection
+ */
+class RedisManager implements Factory
+{
+    /**
+     * The application instance.
+     *
+     * @var \Illuminate\Contracts\Foundation\Application
+     */
+    protected $app;
 
-	/**
-	 * The active connection instances.
-	 *
-	 * @var array
-	 */
-	protected $connections = array();
+    /**
+     * The name of the default driver.
+     *
+     * @var string
+     */
+    protected $driver;
 
-	/**
-	 * Create a new Redis manager instance.
-	 *
-	 * @param  Illuminate\Foundation\Application  $app
-	 * @return void
-	 */
-	public function __construct($app)
-	{
-		$this->app = $app;
-	}
+    /**
+     * The registered custom driver creators.
+     *
+     * @var array
+     */
+    protected $customCreators = [];
 
-	/**
-	 * Get a Redis connection instance.
-	 *
-	 * @param  string  $name
-	 * @return Illuminate\Redis\Database
-	 */
-	public function connection($name = null)
-	{
-		if ( ! isset($this->connections[$name]))
-		{
-			$this->connections[$name] = $this->createConnection($name);
-		}
+    /**
+     * The Redis server configurations.
+     *
+     * @var array
+     */
+    protected $config;
 
-		return $this->connections[$name];
-	}
+    /**
+     * The Redis connections.
+     *
+     * @var mixed
+     */
+    protected $connections;
 
-	/**
-	 * Create the given connection by name.
-	 *
-	 * @param  string  $name
-	 * @return Illuminate\Redis\Database
-	 */
-	protected function createConnection($name)
-	{
-		$config = $this->getConfig($name);
+    /**
+     * Indicates whether event dispatcher is set on connections.
+     *
+     * @var bool
+     */
+    protected $events = false;
 
-		$connection = new Database($config['host'], $config['port'], $config['database']);
+    /**
+     * Create a new Redis manager instance.
+     *
+     * @param  \Illuminate\Contracts\Foundation\Application  $app
+     * @param  string  $driver
+     * @param  array  $config
+     * @return void
+     */
+    public function __construct($app, $driver, array $config)
+    {
+        $this->app = $app;
+        $this->driver = $driver;
+        $this->config = $config;
+    }
 
-		$connection->connect();
+    /**
+     * Get a Redis connection by name.
+     *
+     * @param  string|null  $name
+     * @return \Illuminate\Redis\Connections\Connection
+     */
+    public function connection($name = null)
+    {
+        $name = $name ?: 'default';
 
-		return $connection;
-	}
+        if (isset($this->connections[$name])) {
+            return $this->connections[$name];
+        }
 
-	/**
-	 * Get the configuration for a connection.
-	 *
-	 * @param  string  $name
-	 * @return array
-	 */
-	protected function getConfig($name)
-	{
-		$name = $name ?: $this->getDefaultConnection();
+        return $this->connections[$name] = $this->configure(
+            $this->resolve($name), $name
+        );
+    }
 
-		// To get the database connection configuration, we will just pull each of the
-		// connection configurations and get the configurations for the given name.
-		// If the configuration doesn't exist, we'll throw an exception and bail.
-		$connections = $this->app['config']['database.redis'];
+    /**
+     * Resolve the given connection by name.
+     *
+     * @param  string|null  $name
+     * @return \Illuminate\Redis\Connections\Connection
+     *
+     * @throws \InvalidArgumentException
+     */
+    public function resolve($name = null)
+    {
+        $name = $name ?: 'default';
 
-		if (is_null($config = array_get($connections, $name)))
-		{
-			throw new \InvalidArgumentException("Redis [$name] not configured.");
-		}
+        $options = $this->config['options'] ?? [];
 
-		return $config;
-	}
+        if (isset($this->config[$name])) {
+            return $this->connector()->connect(
+                $this->parseConnectionConfiguration($this->config[$name]),
+                array_merge(Arr::except($options, 'parameters'), ['parameters' => Arr::get($options, 'parameters.'.$name, Arr::get($options, 'parameters', []))])
+            );
+        }
 
-	/**
-	 * Get the default connection name.
-	 *
-	 * @return string
-	 */
-	protected function getDefaultConnection()
-	{
-		return 'default';
-	}
+        if (isset($this->config['clusters'][$name])) {
+            return $this->resolveCluster($name);
+        }
 
-	/**
-	 * Dynamically pass methods to the default connection.
-	 *
-	 * @param  string  $method
-	 * @param  array   $parameters
-	 * @return mixed
-	 */
-	public function __call($method, $parameters)
-	{
-		return call_user_func_array(array($this->connection(), $method), $parameters);
-	}
+        throw new InvalidArgumentException("Redis connection [{$name}] not configured.");
+    }
 
+    /**
+     * Resolve the given cluster connection by name.
+     *
+     * @param  string  $name
+     * @return \Illuminate\Redis\Connections\Connection
+     */
+    protected function resolveCluster($name)
+    {
+        return $this->connector()->connectToCluster(
+            array_map(function ($config) {
+                return $this->parseConnectionConfiguration($config);
+            }, $this->config['clusters'][$name]),
+            $this->config['clusters']['options'] ?? [],
+            $this->config['options'] ?? []
+        );
+    }
+
+    /**
+     * Configure the given connection to prepare it for commands.
+     *
+     * @param  \Illuminate\Redis\Connections\Connection  $connection
+     * @param  string  $name
+     * @return \Illuminate\Redis\Connections\Connection
+     */
+    protected function configure(Connection $connection, $name)
+    {
+        $connection->setName($name);
+
+        if ($this->events && $this->app->bound('events')) {
+            $connection->setEventDispatcher($this->app->make('events'));
+        }
+
+        return $connection;
+    }
+
+    /**
+     * Get the connector instance for the current driver.
+     *
+     * @return \Illuminate\Contracts\Redis\Connector
+     */
+    protected function connector()
+    {
+        $customCreator = $this->customCreators[$this->driver] ?? null;
+
+        if ($customCreator) {
+            return $customCreator();
+        }
+
+        return match ($this->driver) {
+            'predis' => new PredisConnector,
+            'phpredis' => new PhpRedisConnector,
+            default => null,
+        };
+    }
+
+    /**
+     * Parse the Redis connection configuration.
+     *
+     * @param  mixed  $config
+     * @return array
+     */
+    protected function parseConnectionConfiguration($config)
+    {
+        $parsed = (new ConfigurationUrlParser)->parseConfiguration($config);
+
+        $driver = strtolower($parsed['driver'] ?? '');
+
+        if (in_array($driver, ['tcp', 'tls'])) {
+            $parsed['scheme'] = $driver;
+        }
+
+        return array_filter($parsed, function ($key) {
+            return ! in_array($key, ['driver'], true);
+        }, ARRAY_FILTER_USE_KEY);
+    }
+
+    /**
+     * Return all of the created connections.
+     *
+     * @return array
+     */
+    public function connections()
+    {
+        return $this->connections;
+    }
+
+    /**
+     * Enable the firing of Redis command events.
+     *
+     * @return void
+     */
+    public function enableEvents()
+    {
+        $this->events = true;
+    }
+
+    /**
+     * Disable the firing of Redis command events.
+     *
+     * @return void
+     */
+    public function disableEvents()
+    {
+        $this->events = false;
+    }
+
+    /**
+     * Set the default driver.
+     *
+     * @param  string  $driver
+     * @return void
+     */
+    public function setDriver($driver)
+    {
+        $this->driver = $driver;
+    }
+
+    /**
+     * Disconnect the given connection and remove from local cache.
+     *
+     * @param  string|null  $name
+     * @return void
+     */
+    public function purge($name = null)
+    {
+        $name = $name ?: 'default';
+
+        unset($this->connections[$name]);
+    }
+
+    /**
+     * Register a custom driver creator Closure.
+     *
+     * @param  string  $driver
+     * @param  \Closure  $callback
+     * @return $this
+     */
+    public function extend($driver, Closure $callback)
+    {
+        $this->customCreators[$driver] = $callback->bindTo($this, $this);
+
+        return $this;
+    }
+
+    /**
+     * Pass methods onto the default Redis connection.
+     *
+     * @param  string  $method
+     * @param  array  $parameters
+     * @return mixed
+     */
+    public function __call($method, $parameters)
+    {
+        return $this->connection()->{$method}(...$parameters);
+    }
 }

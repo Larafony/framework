@@ -1,293 +1,438 @@
-<?php namespace Illuminate\View;
+<?php
+
+namespace Illuminate\View;
 
 use ArrayAccess;
-use Illuminate\View\Engines\EngineInterface;
-use Illuminate\Support\Contracts\RenderableInterface as Renderable;
+use BadMethodCallException;
+use Illuminate\Contracts\Support\Arrayable;
+use Illuminate\Contracts\Support\Htmlable;
+use Illuminate\Contracts\Support\MessageProvider;
+use Illuminate\Contracts\Support\Renderable;
+use Illuminate\Contracts\View\Engine;
+use Illuminate\Contracts\View\View as ViewContract;
+use Illuminate\Support\MessageBag;
+use Illuminate\Support\Str;
+use Illuminate\Support\Traits\Macroable;
+use Illuminate\Support\ViewErrorBag;
+use Throwable;
 
-class View implements ArrayAccess, Renderable {
+class View implements ArrayAccess, Htmlable, ViewContract
+{
+    use Macroable {
+        __call as macroCall;
+    }
 
-	/**
-	 * The view environment instance.
-	 *
-	 * @var Illuminate\View\Environment
-	 */
-	protected $environment;
+    /**
+     * The view factory instance.
+     *
+     * @var \Illuminate\View\Factory
+     */
+    protected $factory;
 
-	/**
-	 * The engine implementation.
-	 *
-	 * @var Illuminate\View\Engines\EngineInterface
-	 */
-	protected $engine;
+    /**
+     * The engine implementation.
+     *
+     * @var \Illuminate\Contracts\View\Engine
+     */
+    protected $engine;
 
-	/**
-	 * The name of the view.
-	 *
-	 * @var string
-	 */
-	protected $view;
+    /**
+     * The name of the view.
+     *
+     * @var string
+     */
+    protected $view;
 
-	/**
-	 * The array of view data.
-	 *
-	 * @var array
-	 */
-	protected $data;
+    /**
+     * The array of view data.
+     *
+     * @var array
+     */
+    protected $data;
 
-	/**
-	 * The path to the view file.
-	 *
-	 * @var string
-	 */
-	protected $path;
+    /**
+     * The path to the view file.
+     *
+     * @var string
+     */
+    protected $path;
 
-	/**
-	 * Create a new view instance.
-	 *
-	 * @param  Illuminate\View\Environment  $environment
-	 * @param  Illuminate\View\Engines\EngineInterface  $engine
-	 * @param  string  $view
-	 * @param  string  $path
-	 * @param  array   $data
-	 * @return void
-	 */
-	public function __construct(Environment $environment, EngineInterface $engine, $view, $path, array $data = array())
-	{
-		$this->view = $view;
-		$this->path = $path;
-		$this->data = $data;
-		$this->engine = $engine;
-		$this->environment = $environment;
-	}
+    /**
+     * Create a new view instance.
+     *
+     * @param  \Illuminate\View\Factory  $factory
+     * @param  \Illuminate\Contracts\View\Engine  $engine
+     * @param  string  $view
+     * @param  string  $path
+     * @param  mixed  $data
+     * @return void
+     */
+    public function __construct(Factory $factory, Engine $engine, $view, $path, $data = [])
+    {
+        $this->view = $view;
+        $this->path = $path;
+        $this->engine = $engine;
+        $this->factory = $factory;
 
-	/**
-	 * Get the string contents of the view.
-	 *
-	 * @return string
-	 */
-	public function render()
-	{
-		$env = $this->environment;
+        $this->data = $data instanceof Arrayable ? $data->toArray() : (array) $data;
+    }
 
-		// We will keep track of the amount of views being rendered so we can flush
-		// the section after the complete rendering operation is done. This will
-		// clear out the sections for any separate views that may be rendered.
-		$env->incrementRender();
+    /**
+     * Get the string contents of the view.
+     *
+     * @param  callable|null  $callback
+     * @return string
+     *
+     * @throws \Throwable
+     */
+    public function render(callable $callback = null)
+    {
+        try {
+            $contents = $this->renderContents();
 
-		$env->callComposer($this);
+            $response = isset($callback) ? $callback($this, $contents) : null;
 
-		$contents = $this->getContents();
+            // Once we have the contents of the view, we will flush the sections if we are
+            // done rendering all views so that there is nothing left hanging over when
+            // another view gets rendered in the future by the application developer.
+            $this->factory->flushStateIfDoneRendering();
 
-		// Once we've finished rendering the view, we'll decrement the render count
-		// then if we are at the bottom of the stack we'll flush out sections as
-		// they might interfere with totally separate view's evaluations later.
-		$env->decrementRender();
+            return ! is_null($response) ? $response : $contents;
+        } catch (Throwable $e) {
+            $this->factory->flushState();
 
-		if ($env->doneRendering()) $env->flushSections();
+            throw $e;
+        }
+    }
 
-		return $contents;
-	}
+    /**
+     * Get the contents of the view instance.
+     *
+     * @return string
+     */
+    protected function renderContents()
+    {
+        // We will keep track of the number of views being rendered so we can flush
+        // the section after the complete rendering operation is done. This will
+        // clear out the sections for any separate views that may be rendered.
+        $this->factory->incrementRender();
 
-	/**
-	 * Get the evaluated contents of the view.
-	 *
-	 * @return string
-	 */
-	protected function getContents()
-	{
-		return $this->engine->get($this->path, $this->gatherData());
-	}
+        $this->factory->callComposer($this);
 
-	/**
-	 * Get the data bound to the view instance.
-	 *
-	 * @return array
-	 */
-	protected function gatherData()
-	{
-		$data = array_merge($this->environment->getShared(), $this->data);
+        $contents = $this->getContents();
 
-		foreach ($data as $key => $value)
-		{
-			if ($value instanceof Renderable)
-			{
-				$data[$key] = $value->render();
-			}
-		}
+        // Once we've finished rendering the view, we'll decrement the render count
+        // so that each section gets flushed out next time a view is created and
+        // no old sections are staying around in the memory of an environment.
+        $this->factory->decrementRender();
 
-		return $data;
-	}
+        return $contents;
+    }
 
-	/**
-	 * Add a piece of data to the view.
-	 *
-	 * @param  string|array  $key
-	 * @param  mixed   $value
-	 * @return Illuminate\View\View
-	 */
-	public function with($key, $value = null)
-	{
-		if (is_array($key))
-		{
-			$this->data = array_merge($this->data, $key);
-		}
-		else
-		{
-			$this->data[$key] = $value;
-		}
-		
-		return $this;
-	}
+    /**
+     * Get the evaluated contents of the view.
+     *
+     * @return string
+     */
+    protected function getContents()
+    {
+        return $this->engine->get($this->path, $this->gatherData());
+    }
 
-	/**
-	 * Add a view instance to the view data.
-	 *
-	 * @param  string  $key
-	 * @param  string  $view
-	 * @param  array   $data
-	 * @return Illuminate\View\View
-	 */
-	public function nest($key, $view, array $data = array())
-	{
-		return $this->with($key, $this->environment->make($view, $data));
-	}
+    /**
+     * Get the data bound to the view instance.
+     *
+     * @return array
+     */
+    public function gatherData()
+    {
+        $data = array_merge($this->factory->getShared(), $this->data);
 
-	/**
-	 * Get the view environment instance.
-	 *
-	 * @return Illuminate\View\Environment
-	 */
-	public function getEnvironment()
-	{
-		return $this->environment;
-	}
+        foreach ($data as $key => $value) {
+            if ($value instanceof Renderable) {
+                $data[$key] = $value->render();
+            }
+        }
 
-	/**
-	 * Get the view's rendering engine.
-	 *
-	 * @return Illuminate\View\Engines\EngineInterface
-	 */
-	public function getEngine()
-	{
-		return $this->engine;
-	}
+        return $data;
+    }
 
-	/**
-	 * Get the name of the view.
-	 *
-	 * @return string
-	 */
-	public function getName()
-	{
-		return $this->view;
-	}
+    /**
+     * Get the sections of the rendered view.
+     *
+     * @return array
+     *
+     * @throws \Throwable
+     */
+    public function renderSections()
+    {
+        return $this->render(function () {
+            return $this->factory->getSections();
+        });
+    }
 
-	/**
-	 * Get the array of view data.
-	 *
-	 * @return array
-	 */
-	public function getData()
-	{
-		return $this->data;
-	}
+    /**
+     * Add a piece of data to the view.
+     *
+     * @param  string|array  $key
+     * @param  mixed  $value
+     * @return $this
+     */
+    public function with($key, $value = null)
+    {
+        if (is_array($key)) {
+            $this->data = array_merge($this->data, $key);
+        } else {
+            $this->data[$key] = $value;
+        }
 
-	/**
-	 * Get the path to the view file.
-	 *
-	 * @return string
-	 */
-	public function getPath()
-	{
-		return $this->path;
-	}
+        return $this;
+    }
 
-	/**
-	 * Set the path to the view.
-	 *
-	 * @param  string  $path
-	 * @return void
-	 */
-	public function setPath($path)
-	{
-		$this->path = $path;
-	}
+    /**
+     * Add a view instance to the view data.
+     *
+     * @param  string  $key
+     * @param  string  $view
+     * @param  array  $data
+     * @return $this
+     */
+    public function nest($key, $view, array $data = [])
+    {
+        return $this->with($key, $this->factory->make($view, $data));
+    }
 
-	/**
-	 * Determine if a piece of data is bound.
-	 *
-	 * @param  string  $key
-	 * @return bool
-	 */
-	public function offsetExists($key)
-	{
-		return array_key_exists($key, $this->data);
-	}
+    /**
+     * Add validation errors to the view.
+     *
+     * @param  \Illuminate\Contracts\Support\MessageProvider|array  $provider
+     * @param  string  $bag
+     * @return $this
+     */
+    public function withErrors($provider, $bag = 'default')
+    {
+        return $this->with('errors', (new ViewErrorBag)->put(
+            $bag, $this->formatErrors($provider)
+        ));
+    }
 
-	/**
-	 * Get a piece of bound data to the view.
-	 *
-	 * @param  string  $key
-	 * @return mixed
-	 */
-	public function offsetGet($key)
-	{
-		return $this->data[$key];
-	}
+    /**
+     * Parse the given errors into an appropriate value.
+     *
+     * @param  \Illuminate\Contracts\Support\MessageProvider|array|string  $provider
+     * @return \Illuminate\Support\MessageBag
+     */
+    protected function formatErrors($provider)
+    {
+        return $provider instanceof MessageProvider
+                        ? $provider->getMessageBag()
+                        : new MessageBag((array) $provider);
+    }
 
-	/**
-	 * Set a piece of data on the view.
-	 *
-	 * @param  string  $key
-	 * @param  mixed   $value
-	 * @return void
-	 */
-	public function offsetSet($key, $value)
-	{
-		$this->with($key, $value);
-	}
+    /**
+     * Get the name of the view.
+     *
+     * @return string
+     */
+    public function name()
+    {
+        return $this->getName();
+    }
 
-	/**
-	 * Unset a piece of data from the view.
-	 *
-	 * @param  string  $key
-	 * @return void
-	 */
-	public function offsetUnset($key)
-	{
-		unset($this->data[$key]);
-	}
+    /**
+     * Get the name of the view.
+     *
+     * @return string
+     */
+    public function getName()
+    {
+        return $this->view;
+    }
 
-	/**
-	 * Get a piece of data from the view.
-	 *
-	 * @return mixed
-	 */
-	public function __get($key)
-	{
-		return $this->data[$key];
-	}
+    /**
+     * Get the array of view data.
+     *
+     * @return array
+     */
+    public function getData()
+    {
+        return $this->data;
+    }
 
-	/**
-	 * Set a piece of data on the view.
-	 *
-	 * @param  string  $key
-	 * @param  mixed   $value
-	 * @return void
-	 */
-	public function __set($key, $value)
-	{
-		$this->with($key, $value);
-	}
+    /**
+     * Get the path to the view file.
+     *
+     * @return string
+     */
+    public function getPath()
+    {
+        return $this->path;
+    }
 
-	/**
-	 * Get the string contents of the view.
-	 *
-	 * @return string
-	 */
-	public function __toString()
-	{
-		return $this->render();
-	}
+    /**
+     * Set the path to the view.
+     *
+     * @param  string  $path
+     * @return void
+     */
+    public function setPath($path)
+    {
+        $this->path = $path;
+    }
 
+    /**
+     * Get the view factory instance.
+     *
+     * @return \Illuminate\View\Factory
+     */
+    public function getFactory()
+    {
+        return $this->factory;
+    }
+
+    /**
+     * Get the view's rendering engine.
+     *
+     * @return \Illuminate\Contracts\View\Engine
+     */
+    public function getEngine()
+    {
+        return $this->engine;
+    }
+
+    /**
+     * Determine if a piece of data is bound.
+     *
+     * @param  string  $key
+     * @return bool
+     */
+    public function offsetExists($key): bool
+    {
+        return array_key_exists($key, $this->data);
+    }
+
+    /**
+     * Get a piece of bound data to the view.
+     *
+     * @param  string  $key
+     * @return mixed
+     */
+    public function offsetGet($key): mixed
+    {
+        return $this->data[$key];
+    }
+
+    /**
+     * Set a piece of data on the view.
+     *
+     * @param  string  $key
+     * @param  mixed  $value
+     * @return void
+     */
+    public function offsetSet($key, $value): void
+    {
+        $this->with($key, $value);
+    }
+
+    /**
+     * Unset a piece of data from the view.
+     *
+     * @param  string  $key
+     * @return void
+     */
+    public function offsetUnset($key): void
+    {
+        unset($this->data[$key]);
+    }
+
+    /**
+     * Get a piece of data from the view.
+     *
+     * @param  string  $key
+     * @return mixed
+     */
+    public function &__get($key)
+    {
+        return $this->data[$key];
+    }
+
+    /**
+     * Set a piece of data on the view.
+     *
+     * @param  string  $key
+     * @param  mixed  $value
+     * @return void
+     */
+    public function __set($key, $value)
+    {
+        $this->with($key, $value);
+    }
+
+    /**
+     * Check if a piece of data is bound to the view.
+     *
+     * @param  string  $key
+     * @return bool
+     */
+    public function __isset($key)
+    {
+        return isset($this->data[$key]);
+    }
+
+    /**
+     * Remove a piece of bound data from the view.
+     *
+     * @param  string  $key
+     * @return void
+     */
+    public function __unset($key)
+    {
+        unset($this->data[$key]);
+    }
+
+    /**
+     * Dynamically bind parameters to the view.
+     *
+     * @param  string  $method
+     * @param  array  $parameters
+     * @return \Illuminate\View\View
+     *
+     * @throws \BadMethodCallException
+     */
+    public function __call($method, $parameters)
+    {
+        if (static::hasMacro($method)) {
+            return $this->macroCall($method, $parameters);
+        }
+
+        if (! str_starts_with($method, 'with')) {
+            throw new BadMethodCallException(sprintf(
+                'Method %s::%s does not exist.', static::class, $method
+            ));
+        }
+
+        return $this->with(Str::camel(substr($method, 4)), $parameters[0]);
+    }
+
+    /**
+     * Get content as a string of HTML.
+     *
+     * @return string
+     */
+    public function toHtml()
+    {
+        return $this->render();
+    }
+
+    /**
+     * Get the string contents of the view.
+     *
+     * @return string
+     *
+     * @throws \Throwable
+     */
+    public function __toString()
+    {
+        return $this->render();
+    }
 }

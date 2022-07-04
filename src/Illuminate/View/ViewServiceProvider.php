@@ -1,169 +1,159 @@
-<?php namespace Illuminate\View;
+<?php
 
-use Illuminate\Support\MessageBag;
-use Illuminate\View\Engines\PhpEngine;
+namespace Illuminate\View;
+
 use Illuminate\Support\ServiceProvider;
-use Illuminate\View\Engines\BladeEngine;
+use Illuminate\View\Compilers\BladeCompiler;
 use Illuminate\View\Engines\CompilerEngine;
 use Illuminate\View\Engines\EngineResolver;
-use Illuminate\View\Compilers\BladeCompiler;
+use Illuminate\View\Engines\FileEngine;
+use Illuminate\View\Engines\PhpEngine;
 
-class ViewServiceProvider extends ServiceProvider {
+class ViewServiceProvider extends ServiceProvider
+{
+    /**
+     * Register the service provider.
+     *
+     * @return void
+     */
+    public function register()
+    {
+        $this->registerFactory();
+        $this->registerViewFinder();
+        $this->registerBladeCompiler();
+        $this->registerEngineResolver();
+    }
 
-	/**
-	 * Register the service provider.
-	 *
-	 * @return void
-	 */
-	public function register()
-	{
-		$this->registerEngineResolver();
+    /**
+     * Register the view environment.
+     *
+     * @return void
+     */
+    public function registerFactory()
+    {
+        $this->app->singleton('view', function ($app) {
+            // Next we need to grab the engine resolver instance that will be used by the
+            // environment. The resolver will be used by an environment to get each of
+            // the various engine implementations such as plain PHP or Blade engine.
+            $resolver = $app['view.engine.resolver'];
 
-		$this->registerViewFinder();
+            $finder = $app['view.finder'];
 
-		$this->registerEnvironment();
-	}
+            $factory = $this->createFactory($resolver, $finder, $app['events']);
 
-	/**
-	 * Register the engine resolver instance.
-	 *
-	 * @return void
-	 */
-	public function registerEngineResolver()
-	{
-		list($me, $app) = array($this, $this->app);
+            // We will also set the container instance on this view environment since the
+            // view composers may be classes registered in the container, which allows
+            // for great testable, flexible composers for the application developer.
+            $factory->setContainer($app);
 
-		$app['view.engine.resolver'] = $app->share(function($app) use ($me)
-		{
-			$resolver = new EngineResolver;
+            $factory->share('app', $app);
 
-			// Next we will register the various engines with the resolver so that the
-			// environment can resolve the engines it needs for various views based
-			// on the extension of view files. We call a method for each engines.
-			foreach (array('php', 'blade') as $engine)
-			{
-				$me->{'register'.ucfirst($engine).'Engine'}($resolver);
-			}
+            return $factory;
+        });
+    }
 
-			return $resolver;
-		});
-	}
+    /**
+     * Create a new Factory Instance.
+     *
+     * @param  \Illuminate\View\Engines\EngineResolver  $resolver
+     * @param  \Illuminate\View\ViewFinderInterface  $finder
+     * @param  \Illuminate\Contracts\Events\Dispatcher  $events
+     * @return \Illuminate\View\Factory
+     */
+    protected function createFactory($resolver, $finder, $events)
+    {
+        return new Factory($resolver, $finder, $events);
+    }
 
-	/**
-	 * Register the PHP engine implementation.
-	 *
-	 * @param  Illuminate\View\Engines\EngineResolver  $resolver
-	 * @return void
-	 */
-	public function registerPhpEngine($resolver)
-	{
-		$resolver->register('php', function() { return new PhpEngine; });
-	}
+    /**
+     * Register the view finder implementation.
+     *
+     * @return void
+     */
+    public function registerViewFinder()
+    {
+        $this->app->bind('view.finder', function ($app) {
+            return new FileViewFinder($app['files'], $app['config']['view.paths']);
+        });
+    }
 
-	/**
-	 * Register the Blade engine implementation.
-	 *
-	 * @param  Illuminate\View\Engines\EngineResolver  $resolver
-	 * @return void
-	 */
-	public function registerBladeEngine($resolver)
-	{
-		$app = $this->app;
+    /**
+     * Register the Blade compiler implementation.
+     *
+     * @return void
+     */
+    public function registerBladeCompiler()
+    {
+        $this->app->singleton('blade.compiler', function ($app) {
+            return tap(new BladeCompiler(
+                $app['files'],
+                $app['config']['view.compiled'],
+                $app['config']->get('view.relative_hash', false) ? $app->basePath() : '',
+                $app['config']->get('view.cache', true),
+                $app['config']->get('view.compiled_extension', 'php'),
+            ), function ($blade) {
+                $blade->component('dynamic-component', DynamicComponent::class);
+            });
+        });
+    }
 
-		$resolver->register('blade', function() use ($app)
-		{
-			$cache = $app['path'].'/storage/views';
+    /**
+     * Register the engine resolver instance.
+     *
+     * @return void
+     */
+    public function registerEngineResolver()
+    {
+        $this->app->singleton('view.engine.resolver', function () {
+            $resolver = new EngineResolver;
 
-			// The Compiler engine requires an instance of the CompilerInterface, which in
-			// this case will be the Blade compiler, so we'll first create the compiler
-			// instance to pass into the engine so it can compile the views properly.
-			$compiler = new BladeCompiler($app['files'], $cache);
+            // Next, we will register the various view engines with the resolver so that the
+            // environment will resolve the engines needed for various views based on the
+            // extension of view file. We call a method for each of the view's engines.
+            foreach (['file', 'php', 'blade'] as $engine) {
+                $this->{'register'.ucfirst($engine).'Engine'}($resolver);
+            }
 
-			return new CompilerEngine($compiler, $app['files']);
-		});
-	}
+            return $resolver;
+        });
+    }
 
-	/**
-	 * Register the view finder implementation.
-	 *
-	 * @return void
-	 */
-	public function registerViewFinder()
-	{
-		$this->app['view.finder'] = $this->app->share(function($app)
-		{
-			$paths = $app['config']['view.paths'];
+    /**
+     * Register the file engine implementation.
+     *
+     * @param  \Illuminate\View\Engines\EngineResolver  $resolver
+     * @return void
+     */
+    public function registerFileEngine($resolver)
+    {
+        $resolver->register('file', function () {
+            return new FileEngine($this->app['files']);
+        });
+    }
 
-			return new FileViewFinder($app['files'], $paths);
-		});
-	}
+    /**
+     * Register the PHP engine implementation.
+     *
+     * @param  \Illuminate\View\Engines\EngineResolver  $resolver
+     * @return void
+     */
+    public function registerPhpEngine($resolver)
+    {
+        $resolver->register('php', function () {
+            return new PhpEngine($this->app['files']);
+        });
+    }
 
-	/**
-	 * Register the view environment.
-	 *
-	 * @return void
-	 */
-	public function registerEnvironment()
-	{
-		$me = $this;
-
-		$this->app['view'] = $this->app->share(function($app) use ($me)
-		{
-			// Next we need to grab the engine resolver instance that will be used by the
-			// environment. The resolver will be used by an environment to get each of
-			// the various engine implementations such as plain PHP or Blade engine.
-			$resolver = $app['view.engine.resolver'];
-
-			$finder = $app['view.finder'];
-
-			$events = $app['events'];
-
-			$environment = new Environment($resolver, $finder, $events);
-
-			// If the current session has an "errors" variable bound to it, we will share
-			// its value with all view instances so the views can easily access errors
-			// without having to bind. An empty bag is set when there aren't errors.
-			if ($me->sessionHasErrors($app))
-			{
-				$errors = $app['session']->get('errors');
-
-				$environment->share('errors', $errors);
-			}
-
-			// Putting the errors in the view for every view allows the developer to just
-			// assume that some errors are always available, which is convenient since
-			// they don't have to continually run checks for the presence of errors.
-			else
-			{
-				$environment->share('errors', new MessageBag);
-			}
-
-			// We will also set the container instance on this view environment since the
-			// view composers may be classes registered in the container, which allows
-			// for great testable, flexible composers for the application developer.
-			$environment->setContainer($app);
-
-			$environment->share('app', $app);
-
-			return $environment;
-		});
-	}
-
-	/**
-	 * Determine if the application session has errors.
-	 *
-	 * @param  Illuminate\Foundation\Application  $app
-	 * @return bool
-	 */
-	public function sessionHasErrors($app)
-	{
-		$config = $app['config']['session'];
-
-		if (isset($app['session']) and ! is_null($config['driver']))
-		{
-			return $app['session']->has('errors');
-		}
-
-	}
-
+    /**
+     * Register the Blade engine implementation.
+     *
+     * @param  \Illuminate\View\Engines\EngineResolver  $resolver
+     * @return void
+     */
+    public function registerBladeEngine($resolver)
+    {
+        $resolver->register('blade', function () {
+            return new CompilerEngine($this->app['blade.compiler'], $this->app['files']);
+        });
+    }
 }

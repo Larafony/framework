@@ -1,105 +1,78 @@
 <?php
 
-use Mockery as m;
+namespace Illuminate\Tests\Pagination;
+
 use Illuminate\Pagination\Paginator;
+use PHPUnit\Framework\TestCase;
 
-class PaginatorTest extends PHPUnit_Framework_TestCase {
+class PaginatorTest extends TestCase
+{
+    public function testSimplePaginatorReturnsRelevantContextInformation()
+    {
+        $p = new Paginator($array = ['item3', 'item4', 'item5'], 2, 2);
 
-	public function tearDown()
-	{
-		m::close();
-	}
+        $this->assertEquals(2, $p->currentPage());
+        $this->assertTrue($p->hasPages());
+        $this->assertTrue($p->hasMorePages());
+        $this->assertEquals(['item3', 'item4'], $p->items());
 
+        $pageInfo = [
+            'per_page' => 2,
+            'current_page' => 2,
+            'first_page_url' => '/?page=1',
+            'next_page_url' => '/?page=3',
+            'prev_page_url' => '/?page=1',
+            'from' => 3,
+            'to' => 4,
+            'data' => ['item3', 'item4'],
+            'path' => '/',
+        ];
 
-	public function testPaginationContextIsSetupCorrectly()
-	{
-		$p = new Paginator($env = m::mock('Illuminate\Pagination\Environment'), array('foo', 'bar', 'baz'), 3, 2);
-		$env->shouldReceive('getCurrentPage')->once()->andReturn(1);
-		$p->setupPaginationContext();
+        $this->assertEquals($pageInfo, $p->toArray());
+    }
 
-		$this->assertEquals(2, $p->getLastPage());
-		$this->assertEquals(1, $p->getCurrentPage());
-	}
+    public function testPaginatorRemovesTrailingSlashes()
+    {
+        $p = new Paginator($array = ['item1', 'item2', 'item3'], 2, 2,
+                                    ['path' => 'http://website.com/test/']);
 
+        $this->assertSame('http://website.com/test?page=1', $p->previousPageUrl());
+    }
 
-	public function testPaginationContextHandlesHugeCurrentPage()
-	{
-		$p = new Paginator($env = m::mock('Illuminate\Pagination\Environment'), array('foo', 'bar', 'baz'), 3, 2);
-		$env->shouldReceive('getCurrentPage')->once()->andReturn(15);
-		$p->setupPaginationContext();
+    public function testPaginatorGeneratesUrlsWithoutTrailingSlash()
+    {
+        $p = new Paginator($array = ['item1', 'item2', 'item3'], 2, 2,
+                                    ['path' => 'http://website.com/test']);
 
-		$this->assertEquals(2, $p->getLastPage());
-		$this->assertEquals(2, $p->getCurrentPage());
-	}
+        $this->assertSame('http://website.com/test?page=1', $p->previousPageUrl());
+    }
 
+    public function testItRetrievesThePaginatorOptions()
+    {
+        $p = new Paginator($array = ['item1', 'item2', 'item3'], 2, 2,
+            $options = ['path' => 'http://website.com/test']);
 
-	public function testPaginationContextHandlesPageLessThanOne()
-	{
-		$p = new Paginator($env = m::mock('Illuminate\Pagination\Environment'), array('foo', 'bar', 'baz'), 3, 2);
-		$env->shouldReceive('getCurrentPage')->once()->andReturn(-1);
-		$p->setupPaginationContext();
+        $this->assertSame($p->getOptions(), $options);
+    }
 
-		$this->assertEquals(2, $p->getLastPage());
-		$this->assertEquals(1, $p->getCurrentPage());
-	}
+    public function testPaginatorReturnsPath()
+    {
+        $p = new Paginator($array = ['item1', 'item2', 'item3'], 2, 2,
+                                    ['path' => 'http://website.com/test']);
 
+        $this->assertSame($p->path(), 'http://website.com/test');
+    }
 
-	public function testPaginationContextHandlesPageInvalidFormat()
-	{
-		$p = new Paginator($env = m::mock('Illuminate\Pagination\Environment'), array('foo', 'bar', 'baz'), 3, 2);
-		$env->shouldReceive('getCurrentPage')->once()->andReturn('abc');
-		$p->setupPaginationContext();
+    public function testCanTransformPaginatorItems()
+    {
+        $p = new Paginator($array = ['item1', 'item2', 'item3'], 3, 1,
+                                    ['path' => 'http://website.com/test']);
 
-		$this->assertEquals(2, $p->getLastPage());
-		$this->assertEquals(1, $p->getCurrentPage());
-	}
+        $p->through(function ($item) {
+            return substr($item, 4, 1);
+        });
 
-
-	public function testPaginationContextHandlesPageMissing()
-	{
-		$p = new Paginator($env = m::mock('Illuminate\Pagination\Environment'), array('foo', 'bar', 'baz'), 3, 2);
-		$env->shouldReceive('getCurrentPage')->once()->andReturn(null);
-		$p->setupPaginationContext();
-
-		$this->assertEquals(2, $p->getLastPage());
-		$this->assertEquals(1, $p->getCurrentPage());
-	}
-
-
-	public function testGetLinksCallsEnvironmentProperly()
-	{
-		$p = new Paginator($env = m::mock('Illuminate\Pagination\Environment'), array('foo', 'bar', 'baz'), 3, 2);
-		$env->shouldReceive('getPaginationView')->once()->with($p)->andReturn('foo');
-
-		$this->assertEquals('foo', $p->links());
-	}
-
-
-	public function testGetUrlProperlyFormatsUrl()
-	{
-		$p = new Paginator($env = m::mock('Illuminate\Pagination\Environment'), array('foo', 'bar', 'baz'), 3, 2);
-		$env->shouldReceive('getCurrentUrl')->andReturn('http://foo.com');
-
-		$this->assertEquals('http://foo.com?page=1', $p->getUrl(1));
-		$p->addQuery('foo', 'bar');
-		$this->assertEquals('http://foo.com?page=1&foo=bar', $p->getUrl(1));
-	}
-
-
-	public function testPaginatorIsCountable()
-	{
-		$p = new Paginator($env = m::mock('Illuminate\Pagination\Environment'), array('foo', 'bar', 'baz'), 3, 2);
-
-		$this->assertEquals(3, count($p));
-	}
-
-
-	public function testPaginatorIsIterable()
-	{
-		$p = new Paginator($env = m::mock('Illuminate\Pagination\Environment'), array('foo', 'bar', 'baz'), 3, 2);
-
-		$this->assertInstanceOf('ArrayIterator', $p->getIterator());
-		$this->assertEquals(array('foo', 'bar', 'baz'), $p->getIterator()->getArrayCopy());
-	}
-
+        $this->assertInstanceOf(Paginator::class, $p);
+        $this->assertSame(['1', '2', '3'], $p->items());
+    }
 }

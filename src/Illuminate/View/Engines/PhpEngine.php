@@ -1,59 +1,83 @@
-<?php namespace Illuminate\View\Engines;
+<?php
 
-use Illuminate\View\Exception;
-use Illuminate\View\Environment;
+namespace Illuminate\View\Engines;
 
-class PhpEngine implements EngineInterface {
+use Illuminate\Contracts\View\Engine;
+use Illuminate\Filesystem\Filesystem;
+use Throwable;
 
-	/**
-	 * Get the evaluated contents of the view.
-	 *
-	 * @param  string  $path
-	 * @param  array   $data
-	 * @return string
-	 */
-	public function get($path, array $data = array())
-	{
-		return $this->evaluatePath($path, $data);
-	}
+class PhpEngine implements Engine
+{
+    /**
+     * The filesystem instance.
+     *
+     * @var \Illuminate\Filesystem\Filesystem
+     */
+    protected $files;
 
-	/**
-	 * Get the evaluated contents of the view at the given path.
-	 *
-	 * @param  string  $path
-	 * @param  array   $data
-	 * @return string
-	 */
-	protected function evaluatePath($__path, $__data)
-	{
-		ob_start();
+    /**
+     * Create a new file engine instance.
+     *
+     * @param  \Illuminate\Filesystem\Filesystem  $files
+     * @return void
+     */
+    public function __construct(Filesystem $files)
+    {
+        $this->files = $files;
+    }
 
-		extract($__data);
+    /**
+     * Get the evaluated contents of the view.
+     *
+     * @param  string  $path
+     * @param  array  $data
+     * @return string
+     */
+    public function get($path, array $data = [])
+    {
+        return $this->evaluatePath($path, $data);
+    }
 
-		// We'll evaluate the contents of the view inside a try/catch block so we can
-		// flush out any stray output that might get out before an error occurs or
-		// an exception is thrown. This prevents any partial views from leaking.
-		try
-		{
-			include $__path;
-		}
-		catch (\Exception $e)
-		{
-			$this->handleViewException($e);
-		}
+    /**
+     * Get the evaluated contents of the view at the given path.
+     *
+     * @param  string  $path
+     * @param  array  $data
+     * @return string
+     */
+    protected function evaluatePath($path, $data)
+    {
+        $obLevel = ob_get_level();
 
-		return ob_get_clean();
-	}
+        ob_start();
 
-	/**
-	 * Handle a view exception.
-	 *
-	 * @param  Exception  $e
-	 * @return void
-	 */
-	protected function handleViewException($e)
-	{
-		ob_get_clean(); throw $e;
-	}
+        // We'll evaluate the contents of the view inside a try/catch block so we can
+        // flush out any stray output that might get out before an error occurs or
+        // an exception is thrown. This prevents any partial views from leaking.
+        try {
+            $this->files->getRequire($path, $data);
+        } catch (Throwable $e) {
+            $this->handleViewException($e, $obLevel);
+        }
 
+        return ltrim(ob_get_clean());
+    }
+
+    /**
+     * Handle a view exception.
+     *
+     * @param  \Throwable  $e
+     * @param  int  $obLevel
+     * @return void
+     *
+     * @throws \Throwable
+     */
+    protected function handleViewException(Throwable $e, $obLevel)
+    {
+        while (ob_get_level() > $obLevel) {
+            ob_end_clean();
+        }
+
+        throw $e;
+    }
 }

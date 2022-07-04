@@ -1,33 +1,94 @@
 <?php
 
-use Mockery as m;
+namespace Illuminate\Tests\Database;
+
+use Illuminate\Console\Command;
+use Illuminate\Container\Container;
 use Illuminate\Database\Seeder;
+use Mockery as m;
+use Mockery\Mock;
+use PHPUnit\Framework\TestCase;
+use Symfony\Component\Console\Output\OutputInterface;
 
-class DatabaseSeederTest extends PHPUnit_Framework_TestCase {
+class TestSeeder extends Seeder
+{
+    public function run()
+    {
+        //
+    }
+}
 
-	public function tearDown()
-	{
-		m::close();
-	}
+class TestDepsSeeder extends Seeder
+{
+    public function run(Mock $someDependency, $someParam = '')
+    {
+        //
+    }
+}
 
+class DatabaseSeederTest extends TestCase
+{
+    protected function tearDown(): void
+    {
+        m::close();
+    }
 
-	public function testTablesAreSeededFromSeedFiles()
-	{
-		$seeder = new Seeder($files = m::mock('Illuminate\Filesystem'), $events = m::mock('Illuminate\Events\Dispatcher'));
-		$files->shouldReceive('glob')->once()->with('path/*.php')->andReturn(array('path/b.php', 'path/a.php'));
-		$files->shouldReceive('getRequire')->once()->with('path/a.php')->andReturn(array('table' => 'a_table', array('name' => 'Taylor')));
-		$files->shouldReceive('getRequire')->once()->with('path/b.php')->andReturn(array(array('name' => 'Dayle')));
-		$connection = m::mock('Illuminate\Database\Connection');
-		$table = m::mock('Illuminate\Database\Query\Builder');
-		$connection->shouldReceive('table')->with('a_table')->andReturn($table);
-		$table->shouldReceive('delete')->twice();
-		$table->shouldReceive('insert')->once()->with(array(array('name' => 'Taylor')));
-		$connection->shouldReceive('table')->with('b')->andReturn($table);
-		$table->shouldReceive('insert')->once()->with(array(array('name' => 'Dayle')));
-		$events->shouldReceive('fire')->once()->with('illuminate.seeding', array('table' => 'a_table', 'count' => 1));
-		$events->shouldReceive('fire')->once()->with('illuminate.seeding', array('table' => 'b', 'count' => 1));
+    public function testCallResolveTheClassAndCallsRun()
+    {
+        $seeder = new TestSeeder;
+        $seeder->setContainer($container = m::mock(Container::class));
+        $output = m::mock(OutputInterface::class);
+        $output->shouldReceive('writeln')->once();
+        $command = m::mock(Command::class);
+        $command->shouldReceive('getOutput')->once()->andReturn($output);
+        $seeder->setCommand($command);
+        $container->shouldReceive('make')->once()->with('ClassName')->andReturn($child = m::mock(Seeder::class));
+        $child->shouldReceive('setContainer')->once()->with($container)->andReturn($child);
+        $child->shouldReceive('setCommand')->once()->with($command)->andReturn($child);
+        $child->shouldReceive('__invoke')->once();
+        $command->shouldReceive('getOutput')->once()->andReturn($output);
+        $output->shouldReceive('writeln')->once();
 
-		$this->assertEquals(2, $seeder->seed($connection, 'path'));
-	}
+        $seeder->call('ClassName');
+    }
 
+    public function testSetContainer()
+    {
+        $seeder = new TestSeeder;
+        $container = m::mock(Container::class);
+        $this->assertEquals($seeder->setContainer($container), $seeder);
+    }
+
+    public function testSetCommand()
+    {
+        $seeder = new TestSeeder;
+        $command = m::mock(Command::class);
+        $this->assertEquals($seeder->setCommand($command), $seeder);
+    }
+
+    public function testInjectDependenciesOnRunMethod()
+    {
+        $container = m::mock(Container::class);
+        $container->shouldReceive('call');
+
+        $seeder = new TestDepsSeeder;
+        $seeder->setContainer($container);
+
+        $seeder->__invoke();
+
+        $container->shouldHaveReceived('call')->once()->with([$seeder, 'run'], []);
+    }
+
+    public function testSendParamsOnCallMethodWithDeps()
+    {
+        $container = m::mock(Container::class);
+        $container->shouldReceive('call');
+
+        $seeder = new TestDepsSeeder;
+        $seeder->setContainer($container);
+
+        $seeder->__invoke(['test1', 'test2']);
+
+        $container->shouldHaveReceived('call')->once()->with([$seeder, 'run'], ['test1', 'test2']);
+    }
 }

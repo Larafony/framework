@@ -1,60 +1,114 @@
-<?php namespace Illuminate\Hashing;
+<?php
 
-class BcryptHasher implements HasherInterface {
+namespace Illuminate\Hashing;
 
-	/**
-	 * Hash the given value.
-	 *
-	 * @param  string  $value
-	 * @return array   $options
-	 * @return string
-	 */
-	public function make($value, array $options = array())
-	{
-		$rounds = isset($options['rounds']) ? $options['rounds'] : 8;
+use Illuminate\Contracts\Hashing\Hasher as HasherContract;
+use RuntimeException;
 
-		$work = str_pad($rounds, 2, '0', STR_PAD_LEFT);
+class BcryptHasher extends AbstractHasher implements HasherContract
+{
+    /**
+     * The default cost factor.
+     *
+     * @var int
+     */
+    protected $rounds = 10;
 
-		// Bcrypt expects the salt to be 22 base64 encoded characters including dots
-		// and slashes. We will get rid of the plus signs included in the base64
-		// data and replace them all with dots so it's appropriately encoded.
-		if (function_exists('openssl_random_pseudo_bytes'))
-		{
-			$salt = openssl_random_pseudo_bytes(16);
-		}
-		else
-		{
-			$salt = $this->getRandomSalt();
-		}
+    /**
+     * Indicates whether to perform an algorithm check.
+     *
+     * @var bool
+     */
+    protected $verifyAlgorithm = false;
 
-		$salt = substr(strtr(base64_encode($salt), '+', '.'), 0 , 22);
+    /**
+     * Create a new hasher instance.
+     *
+     * @param  array  $options
+     * @return void
+     */
+    public function __construct(array $options = [])
+    {
+        $this->rounds = $options['rounds'] ?? $this->rounds;
+        $this->verifyAlgorithm = $options['verify'] ?? $this->verifyAlgorithm;
+    }
 
-		return crypt($value, '$2a$'.$work.'$'.$salt);
-	}
+    /**
+     * Hash the given value.
+     *
+     * @param  string  $value
+     * @param  array  $options
+     * @return string
+     *
+     * @throws \RuntimeException
+     */
+    public function make($value, array $options = [])
+    {
+        $hash = password_hash($value, PASSWORD_BCRYPT, [
+            'cost' => $this->cost($options),
+        ]);
 
-	/**
-	 * Check the given plain value against a hash.
-	 *
-	 * @param  string  $value
-	 * @param  string  $hashedValue
-	 * @param  array   $options
-	 * @return bool
-	 */
-	public function check($value, $hashedValue, array $options = array())
-	{
-		return crypt($value, $hashedValue) === $hashedValue;
-	}
+        if ($hash === false) {
+            throw new RuntimeException('Bcrypt hashing not supported.');
+        }
 
-	/**
-	 * Get a random salt to use during hashing.
-	 *
-	 * @return string
-	 */
-	protected function getRandomSalt()
-	{
-		$pool = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
+        return $hash;
+    }
 
-		return substr(str_shuffle(str_repeat($pool, 5)), 0, 40);
-	}
+    /**
+     * Check the given plain value against a hash.
+     *
+     * @param  string  $value
+     * @param  string  $hashedValue
+     * @param  array  $options
+     * @return bool
+     *
+     * @throws \RuntimeException
+     */
+    public function check($value, $hashedValue, array $options = [])
+    {
+        if ($this->verifyAlgorithm && $this->info($hashedValue)['algoName'] !== 'bcrypt') {
+            throw new RuntimeException('This password does not use the Bcrypt algorithm.');
+        }
 
+        return parent::check($value, $hashedValue, $options);
+    }
+
+    /**
+     * Check if the given hash has been hashed using the given options.
+     *
+     * @param  string  $hashedValue
+     * @param  array  $options
+     * @return bool
+     */
+    public function needsRehash($hashedValue, array $options = [])
+    {
+        return password_needs_rehash($hashedValue, PASSWORD_BCRYPT, [
+            'cost' => $this->cost($options),
+        ]);
+    }
+
+    /**
+     * Set the default password work factor.
+     *
+     * @param  int  $rounds
+     * @return $this
+     */
+    public function setRounds($rounds)
+    {
+        $this->rounds = (int) $rounds;
+
+        return $this;
+    }
+
+    /**
+     * Extract the cost value from the options array.
+     *
+     * @param  array  $options
+     * @return int
+     */
+    protected function cost(array $options = [])
+    {
+        return $options['rounds'] ?? $this->rounds;
+    }
 }

@@ -1,93 +1,137 @@
-<?php namespace Illuminate\Queue\Console;
+<?php
 
-use Illuminate\Queue\Listener;
+namespace Illuminate\Queue\Console;
+
 use Illuminate\Console\Command;
-use Symfony\Component\Console\Input\InputOption;
-use Symfony\Component\Console\Input\InputArgument;
+use Illuminate\Queue\Listener;
+use Illuminate\Queue\ListenerOptions;
+use Symfony\Component\Console\Attribute\AsCommand;
 
-class ListenCommand extends Command {
+#[AsCommand(name: 'queue:listen')]
+class ListenCommand extends Command
+{
+    /**
+     * The console command name.
+     *
+     * @var string
+     */
+    protected $signature = 'queue:listen
+                            {connection? : The name of connection}
+                            {--name=default : The name of the worker}
+                            {--delay=0 : The number of seconds to delay failed jobs (Deprecated)}
+                            {--backoff=0 : The number of seconds to wait before retrying a job that encountered an uncaught exception}
+                            {--force : Force the worker to run even in maintenance mode}
+                            {--memory=128 : The memory limit in megabytes}
+                            {--queue= : The queue to listen on}
+                            {--sleep=3 : Number of seconds to sleep when no job is available}
+                            {--timeout=60 : The number of seconds a child process can run}
+                            {--tries=1 : Number of times to attempt a job before logging it failed}';
 
-	/**
-	 * The console command name.
-	 *
-	 * @var string
-	 */
-	protected $name = 'queue:listen';
+    /**
+     * The name of the console command.
+     *
+     * This name is used to identify the command during lazy loading.
+     *
+     * @var string|null
+     *
+     * @deprecated
+     */
+    protected static $defaultName = 'queue:listen';
 
-	/**
-	 * The console command description.
-	 *
-	 * @var string
-	 */
-	protected $description = 'Listen to a given queue';
+    /**
+     * The console command description.
+     *
+     * @var string
+     */
+    protected $description = 'Listen to a given queue';
 
-	/**
-	 * The queue listener instance.
-	 *
-	 * @var Illuminate\Queue\Listener
-	 */
-	protected $listener;
+    /**
+     * The queue listener instance.
+     *
+     * @var \Illuminate\Queue\Listener
+     */
+    protected $listener;
 
-	/**
-	 * Create a new queue listen command.
-	 *
-	 * @param  Illuminate\Queue\Listener  $listener
-	 * @return void
-	 */
-	public function __construct(Listener $listener)
-	{
-		parent::__construct();
+    /**
+     * Create a new queue listen command.
+     *
+     * @param  \Illuminate\Queue\Listener  $listener
+     * @return void
+     */
+    public function __construct(Listener $listener)
+    {
+        parent::__construct();
 
-		$this->listener = $listener;
-	}
+        $this->setOutputHandler($this->listener = $listener);
+    }
 
-	/**
-	 * Execute the console command.
-	 *
-	 * @return void
-	 */
-	public function fire()
-	{
-		$queue = $this->input->getOption('queue');
+    /**
+     * Execute the console command.
+     *
+     * @return void
+     */
+    public function handle()
+    {
+        // We need to get the right queue for the connection which is set in the queue
+        // configuration file for the application. We will pull it based on the set
+        // connection being run for the queue operation currently being executed.
+        $queue = $this->getQueue(
+            $connection = $this->input->getArgument('connection')
+        );
 
-		$delay = $this->input->getOption('delay');
+        $this->listener->listen(
+            $connection, $queue, $this->gatherOptions()
+        );
+    }
 
-		// The memory limit is the amount of memory we will allow the script to occupy
-		// before killing it and letting a process manager restart it for us, which
-		// is to protect us against any memory leaks that will be in the scripts.
-		$memory = $this->input->getOption('memory');
+    /**
+     * Get the name of the queue connection to listen on.
+     *
+     * @param  string  $connection
+     * @return string
+     */
+    protected function getQueue($connection)
+    {
+        $connection = $connection ?: $this->laravel['config']['queue.default'];
 
-		$connection = $this->input->getArgument('connection');
+        return $this->input->getOption('queue') ?: $this->laravel['config']->get(
+            "queue.connections.{$connection}.queue", 'default'
+        );
+    }
 
-		$this->listener->listen($connection, $queue, $delay, $memory);
-	}
+    /**
+     * Get the listener options for the command.
+     *
+     * @return \Illuminate\Queue\ListenerOptions
+     */
+    protected function gatherOptions()
+    {
+        $backoff = $this->hasOption('backoff')
+                ? $this->option('backoff')
+                : $this->option('delay');
 
-	/**
-	 * Get the console command arguments.
-	 *
-	 * @return array
-	 */
-	protected function getArguments()
-	{
-		return array(
-			array('connection', InputArgument::OPTIONAL, 'The name of connection', null),
-		);
-	}
+        return new ListenerOptions(
+            $this->option('name'),
+            $this->option('env'),
+            $backoff,
+            $this->option('memory'),
+            $this->option('timeout'),
+            $this->option('sleep'),
+            $this->option('tries'),
+            $this->option('force')
+        );
+    }
 
-	/**
-	 * Get the console command options.
-	 *
-	 * @return array
-	 */
-	protected function getOptions()
-	{
-		return array(
-			array('queue', null, InputOption::VALUE_OPTIONAL, 'The queue to listen on'),
-
-			array('delay', null, InputOption::VALUE_OPTIONAL, 'Amount of time to delay failed jobs', 0),
-
-			array('memory', null, InputOption::VALUE_OPTIONAL, 'The memory limit in megabytes', 128),
-		);
-	}
-
+    /**
+     * Set the options on the queue listener.
+     *
+     * @param  \Illuminate\Queue\Listener  $listener
+     * @return void
+     */
+    protected function setOutputHandler(Listener $listener)
+    {
+        $listener->setOutputHandler(function ($type, $line) {
+            $this->output->write($line);
+        });
+    }
 }

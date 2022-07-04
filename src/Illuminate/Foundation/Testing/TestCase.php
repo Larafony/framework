@@ -1,118 +1,265 @@
-<?php namespace Illuminate\Foundation\Testing;
+<?php
 
-use Illuminate\Auth\UserInterface;
+namespace Illuminate\Foundation\Testing;
 
-class TestCase extends \PHPUnit_Framework_TestCase {
+use Carbon\CarbonImmutable;
+use Illuminate\Console\Application as Artisan;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Foundation\Bootstrap\HandleExceptions;
+use Illuminate\Queue\Queue;
+use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Facade;
+use Illuminate\Support\Facades\ParallelTesting;
+use Illuminate\Support\Str;
+use Mockery;
+use Mockery\Exception\InvalidCountException;
+use PHPUnit\Framework\TestCase as BaseTestCase;
+use Throwable;
 
-	/**
-	 * The Illuminate application instance.
-	 *
-	 * @var Illuminate\Foundation\Application
-	 */
-	protected $app;
+abstract class TestCase extends BaseTestCase
+{
+    use Concerns\InteractsWithContainer,
+        Concerns\MakesHttpRequests,
+        Concerns\InteractsWithAuthentication,
+        Concerns\InteractsWithConsole,
+        Concerns\InteractsWithDatabase,
+        Concerns\InteractsWithDeprecationHandling,
+        Concerns\InteractsWithExceptionHandling,
+        Concerns\InteractsWithSession,
+        Concerns\InteractsWithTime,
+        Concerns\InteractsWithViews,
+        Concerns\MocksApplicationServices;
 
-	/**
-	 * The HttpKernel client instance.
-	 *
-	 * @var Illuminate\Foundation\Testing\CLient
-	 */
-	protected $client;
+    /**
+     * The Illuminate application instance.
+     *
+     * @var \Illuminate\Foundation\Application
+     */
+    protected $app;
 
-	/**
-	 * Setup the test environment.
-	 *
-	 * @return void
-	 */
-	public function setUp()
-	{
-		$this->refreshApplication();
-	}
+    /**
+     * The callbacks that should be run after the application is created.
+     *
+     * @var array
+     */
+    protected $afterApplicationCreatedCallbacks = [];
 
-	/**
-	 * Refresh the application instance.
-	 *
-	 * @return void
-	 */
-	protected function refreshApplication()
-	{
-		$this->app = $this->createApplication();
+    /**
+     * The callbacks that should be run before the application is destroyed.
+     *
+     * @var array
+     */
+    protected $beforeApplicationDestroyedCallbacks = [];
 
-		$this->client = $this->createClient();
-	}
+    /**
+     * The exception thrown while running an application destruction callback.
+     *
+     * @var \Throwable
+     */
+    protected $callbackException;
 
-	/**
-	 * Call the given URI and return the Response.
-	 *
-	 * @param  string  $method
-	 * @param  string  $uri
-	 * @param  array   $parameters
-	 * @param  array   $files
-	 * @param  array   $server
-	 * @param  string  $content
-	 * @param  bool    $changeHistory
-	 * @return Illuminate\Http\Response
-	 */
-	public function call()
-	{
-		call_user_func_array(array($this->client, 'request'), func_get_args());
+    /**
+     * Indicates if we have made it through the base setUp function.
+     *
+     * @var bool
+     */
+    protected $setUpHasRun = false;
 
-		return $this->client->getResponse();
-	}
+    /**
+     * Creates the application.
+     *
+     * Needs to be implemented by subclasses.
+     *
+     * @return \Symfony\Component\HttpKernel\HttpKernelInterface
+     */
+    abstract public function createApplication();
 
-	/**
-	 * Call a controller action and return the Response.
-	 *
-	 * @param  string  $method
-	 * @param  string  $action
-	 * @param  array   $wildcards
-	 * @param  array   $parameters
-	 * @param  array   $files
-	 * @param  array   $server
-	 * @param  string  $content
-	 * @param  bool    $changeHistory
-	 * @return Illuminate\Http\Response
-	 */
-	public function action($method, $action, $wildcards = array(), $parameters = array(), $files = array(), $server = array(), $content = null, $changeHistory = true)
-	{
-		$uri = $this->app['url']->action($action, $wildcards, false);
+    /**
+     * Setup the test environment.
+     *
+     * @return void
+     */
+    protected function setUp(): void
+    {
+        Facade::clearResolvedInstances();
 
-		return $this->call($method, $uri, $parameters, $files, $server, $content, $changeHistory);
-	}
+        if (! $this->app) {
+            $this->refreshApplication();
 
-	/**
-	 * Set the currently logged in user for the application.
-	 *
-	 * @param  Illuminate\Auth\UserInterface  $user
-	 * @param  string  $driver
-	 * @return void
-	 */
-	public function be(UserInterface $user, $driver = null)
-	{
-		$this->app['auth']->driver($driver)->setUser($user);
-	}
+            ParallelTesting::callSetUpTestCaseCallbacks($this);
+        }
 
-	/**
-	 * Seed a given database connection.
-	 *
-	 * @param  string  $connection
-	 * @return void
-	 */
-	public function seed($connection = null)
-	{
-		$connection = $this->app['db']->connection($connection);
+        $this->setUpTraits();
 
-		$this->app['seeder']->seed($connection, $this->app['path'].'/database/seeds');
-	}
+        foreach ($this->afterApplicationCreatedCallbacks as $callback) {
+            $callback();
+        }
 
-	/**
-	 * Create a new HttpKernel client instance.
-	 *
-	 * @param  array  $server
-	 * @return Symfony\Component\HttpKernel\Client
-	 */
-	protected function createClient(array $server = array())
-	{
-		return new Client($this->app, $server);
-	}
+        Model::setEventDispatcher($this->app['events']);
 
+        $this->setUpHasRun = true;
+    }
+
+    /**
+     * Refresh the application instance.
+     *
+     * @return void
+     */
+    protected function refreshApplication()
+    {
+        $this->app = $this->createApplication();
+    }
+
+    /**
+     * Boot the testing helper traits.
+     *
+     * @return array
+     */
+    protected function setUpTraits()
+    {
+        $uses = array_flip(class_uses_recursive(static::class));
+
+        if (isset($uses[RefreshDatabase::class])) {
+            $this->refreshDatabase();
+        }
+
+        if (isset($uses[DatabaseMigrations::class])) {
+            $this->runDatabaseMigrations();
+        }
+
+        if (isset($uses[DatabaseTransactions::class])) {
+            $this->beginDatabaseTransaction();
+        }
+
+        if (isset($uses[WithoutMiddleware::class])) {
+            $this->disableMiddlewareForAllTests();
+        }
+
+        if (isset($uses[WithoutEvents::class])) {
+            $this->disableEventsForAllTests();
+        }
+
+        if (isset($uses[WithFaker::class])) {
+            $this->setUpFaker();
+        }
+
+        foreach ($uses as $trait) {
+            if (method_exists($this, $method = 'setUp'.class_basename($trait))) {
+                $this->{$method}();
+            }
+
+            if (method_exists($this, $method = 'tearDown'.class_basename($trait))) {
+                $this->beforeApplicationDestroyed(fn () => $this->{$method}());
+            }
+        }
+
+        return $uses;
+    }
+
+    /**
+     * Clean up the testing environment before the next test.
+     *
+     * @return void
+     *
+     * @throws \Mockery\Exception\InvalidCountException
+     */
+    protected function tearDown(): void
+    {
+        if ($this->app) {
+            $this->callBeforeApplicationDestroyedCallbacks();
+
+            ParallelTesting::callTearDownTestCaseCallbacks($this);
+
+            $this->app->flush();
+
+            $this->app = null;
+        }
+
+        $this->setUpHasRun = false;
+
+        if (property_exists($this, 'serverVariables')) {
+            $this->serverVariables = [];
+        }
+
+        if (property_exists($this, 'defaultHeaders')) {
+            $this->defaultHeaders = [];
+        }
+
+        if (class_exists('Mockery')) {
+            if ($container = Mockery::getContainer()) {
+                $this->addToAssertionCount($container->mockery_getExpectationCount());
+            }
+
+            try {
+                Mockery::close();
+            } catch (InvalidCountException $e) {
+                if (! Str::contains($e->getMethodName(), ['doWrite', 'askQuestion'])) {
+                    throw $e;
+                }
+            }
+        }
+
+        if (class_exists(Carbon::class)) {
+            Carbon::setTestNow();
+        }
+
+        if (class_exists(CarbonImmutable::class)) {
+            CarbonImmutable::setTestNow();
+        }
+
+        $this->afterApplicationCreatedCallbacks = [];
+        $this->beforeApplicationDestroyedCallbacks = [];
+
+        Artisan::forgetBootstrappers();
+        Queue::createPayloadUsing(null);
+        HandleExceptions::forgetApp();
+
+        if ($this->callbackException) {
+            throw $this->callbackException;
+        }
+    }
+
+    /**
+     * Register a callback to be run after the application is created.
+     *
+     * @param  callable  $callback
+     * @return void
+     */
+    public function afterApplicationCreated(callable $callback)
+    {
+        $this->afterApplicationCreatedCallbacks[] = $callback;
+
+        if ($this->setUpHasRun) {
+            $callback();
+        }
+    }
+
+    /**
+     * Register a callback to be run before the application is destroyed.
+     *
+     * @param  callable  $callback
+     * @return void
+     */
+    protected function beforeApplicationDestroyed(callable $callback)
+    {
+        $this->beforeApplicationDestroyedCallbacks[] = $callback;
+    }
+
+    /**
+     * Execute the application's pre-destruction callbacks.
+     *
+     * @return void
+     */
+    protected function callBeforeApplicationDestroyedCallbacks()
+    {
+        foreach ($this->beforeApplicationDestroyedCallbacks as $callback) {
+            try {
+                $callback();
+            } catch (Throwable $e) {
+                if (! $this->callbackException) {
+                    $this->callbackException = $e;
+                }
+            }
+        }
+    }
 }

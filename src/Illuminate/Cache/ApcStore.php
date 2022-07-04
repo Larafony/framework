@@ -1,94 +1,130 @@
-<?php namespace Illuminate\Cache;
+<?php
 
-class ApcStore extends Store {
+namespace Illuminate\Cache;
 
-	/**
-	 * The APC wrapper instance.
-	 *
-	 * @var Illuminate\Cache\ApcWrapper
-	 */
-	protected $apc;
+class ApcStore extends TaggableStore
+{
+    use RetrievesMultipleKeys;
 
-	/**
-	 * A string that should be prepended to keys.
-	 *
-	 * @var string
-	 */
-	protected $prefix;
+    /**
+     * The APC wrapper instance.
+     *
+     * @var \Illuminate\Cache\ApcWrapper
+     */
+    protected $apc;
 
-	/**
-	 * Create a new APC store.
-	 *
-	 * @param  Illuminate\Cache\ApcWrapper  $apc
-	 * @param  string                       $prefix
-	 * @return void
-	 */
-	public function __construct(ApcWrapper $apc, $prefix = '')
-	{
-		$this->apc = $apc;
-		$this->prefix = $prefix;
-	}
+    /**
+     * A string that should be prepended to keys.
+     *
+     * @var string
+     */
+    protected $prefix;
 
-	/**
-	 * Retrieve an item from the cache by key.
-	 *
-	 * @param  string  $key
-	 * @return mixed
-	 */
-	protected function retrieveItem($key)
-	{
-		$value = $this->apc->get($this->prefix.$key);
+    /**
+     * Create a new APC store.
+     *
+     * @param  \Illuminate\Cache\ApcWrapper  $apc
+     * @param  string  $prefix
+     * @return void
+     */
+    public function __construct(ApcWrapper $apc, $prefix = '')
+    {
+        $this->apc = $apc;
+        $this->prefix = $prefix;
+    }
 
-		if ($value !== false)
-		{
-			return $value;
-		}
-	}
+    /**
+     * Retrieve an item from the cache by key.
+     *
+     * @param  string|array  $key
+     * @return mixed
+     */
+    public function get($key)
+    {
+        $value = $this->apc->get($this->prefix.$key);
 
-	/**
-	 * Store an item in the cache for a given number of minutes.
-	 *
-	 * @param  string  $key
-	 * @param  mixed   $value
-	 * @param  int     $minutes
-	 * @return void
-	 */
-	protected function storeItem($key, $value, $minutes)
-	{
-		$this->apc->put($this->prefix.$key, $value, $minutes * 60);
-	}
+        if ($value !== false) {
+            return $value;
+        }
+    }
 
-	/**
-	 * Store an item in the cache indefinitely.
-	 *
-	 * @param  string  $key
-	 * @param  mixed   $value
-	 * @return void
-	 */
-	protected function storeItemForever($key, $value)
-	{
-		return $this->storeItem($key, $value, 0);
-	}
+    /**
+     * Store an item in the cache for a given number of seconds.
+     *
+     * @param  string  $key
+     * @param  mixed  $value
+     * @param  int  $seconds
+     * @return bool
+     */
+    public function put($key, $value, $seconds)
+    {
+        return $this->apc->put($this->prefix.$key, $value, $seconds);
+    }
 
-	/**
-	 * Remove an item from the cache.
-	 *
-	 * @param  string  $key
-	 * @return void
-	 */
-	protected function removeItem($key)
-	{
-		$this->apc->delete($this->prefix.$key);
-	}
+    /**
+     * Increment the value of an item in the cache.
+     *
+     * @param  string  $key
+     * @param  mixed  $value
+     * @return int|bool
+     */
+    public function increment($key, $value = 1)
+    {
+        return $this->apc->increment($this->prefix.$key, $value);
+    }
 
-	/**
-	 * Remove all items from the cache.
-	 *
-	 * @return void
-	 */
-	protected function flushItems()
-	{
-		$this->apc->flush();
-	}
+    /**
+     * Decrement the value of an item in the cache.
+     *
+     * @param  string  $key
+     * @param  mixed  $value
+     * @return int|bool
+     */
+    public function decrement($key, $value = 1)
+    {
+        return $this->apc->decrement($this->prefix.$key, $value);
+    }
 
+    /**
+     * Store an item in the cache indefinitely.
+     *
+     * @param  string  $key
+     * @param  mixed  $value
+     * @return bool
+     */
+    public function forever($key, $value)
+    {
+        return $this->put($key, $value, 0);
+    }
+
+    /**
+     * Remove an item from the cache.
+     *
+     * @param  string  $key
+     * @return bool
+     */
+    public function forget($key)
+    {
+        return $this->apc->delete($this->prefix.$key);
+    }
+
+    /**
+     * Remove all items from the cache.
+     *
+     * @return bool
+     */
+    public function flush()
+    {
+        return $this->apc->flush();
+    }
+
+    /**
+     * Get the cache key prefix.
+     *
+     * @return string
+     */
+    public function getPrefix()
+    {
+        return $this->prefix;
+    }
 }

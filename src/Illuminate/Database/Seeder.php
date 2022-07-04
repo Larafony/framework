@@ -1,118 +1,186 @@
-<?php namespace Illuminate\Database;
+<?php
 
-use Illuminate\Filesystem;
-use Illuminate\Events\Dispatcher;
+namespace Illuminate\Database;
 
-class Seeder {
+use Illuminate\Console\Command;
+use Illuminate\Container\Container;
+use Illuminate\Database\Console\Seeds\WithoutModelEvents;
+use Illuminate\Support\Arr;
+use InvalidArgumentException;
 
-	/**
-	 * The filesystem instance.
-	 *
-	 * @var Illuminate\Filesystem
-	 */
-	protected $files;
+abstract class Seeder
+{
+    /**
+     * The container instance.
+     *
+     * @var \Illuminate\Container\Container
+     */
+    protected $container;
 
-	/**
-	 * The event dispatcher instance.
-	 *
-	 * @var Illuminate\Events\Dispatcher
-	 */
-	protected $events;
+    /**
+     * The console command instance.
+     *
+     * @var \Illuminate\Console\Command
+     */
+    protected $command;
 
-	/**
-	 * The database seed file list.
-	 *
-	 * @var array
-	 */
-	protected $seeds;
+    /**
+     * Seeders that have been called at least one time.
+     *
+     * @var array
+     */
+    protected static $called = [];
 
-	/**
-	 * Create a new database seeder instance.
-	 *
-	 * @param  Illuminate\Filesystem  $files
-	 * @param  Illuminate\Events\Dispatcher  $events
-	 * @return void
-	 */
-	public function __construct(Filesystem $files, Dispatcher $events = null)
-	{
-		$this->files = $files;
-		$this->events = $events;
-	}
+    /**
+     * Run the given seeder class.
+     *
+     * @param  array|string  $class
+     * @param  bool  $silent
+     * @param  array  $parameters
+     * @return $this
+     */
+    public function call($class, $silent = false, array $parameters = [])
+    {
+        $classes = Arr::wrap($class);
 
-	/**
-	 * Seed the given connection from the given path.
-	 *
-	 * @param  Illuminate\Database\Connection  $connection
-	 * @param  string  $path
-	 * @return int
-	 */
-	public function seed(Connection $connection, $path)
-	{
-		$total = 0;
+        foreach ($classes as $class) {
+            $seeder = $this->resolve($class);
 
-		foreach ($this->getFiles($path) as $file)
-		{
-			$records = $this->files->getRequire($file);
+            $name = get_class($seeder);
 
-			// We'll grab the table name here, which could either come from the array or
-			// from the filename itself. Then, we will simply insert the records into
-			// the databases via a connection and fire an event noting the seeding.
-			$table = $this->getTable($records, $file);
+            if ($silent === false && isset($this->command)) {
+                $this->command->getOutput()->writeln("<comment>Seeding:</comment> {$name}");
+            }
 
-			$connection->table($table)->delete();
+            $startTime = microtime(true);
 
-			$connection->table($table)->insert($records);
+            $seeder->__invoke($parameters);
 
-			$total += $count = count($records);
+            $runTime = number_format((microtime(true) - $startTime) * 1000, 2);
 
-			// Once we have seeded the table, we will fire an event to let any listeners
-			// know the tables have been seeded and how many records were inserted so
-			// information can be presented to the developer about the seeding run.
-			if (isset($this->events))
-			{
-				$payload = compact('table', 'count');
+            if ($silent === false && isset($this->command)) {
+                $this->command->getOutput()->writeln("<info>Seeded:</info>  {$name} ({$runTime}ms)");
+            }
 
-				$this->events->fire('illuminate.seeding', $payload);
-			}
-		}
+            static::$called[] = $class;
+        }
 
-		return $total;
-	}
+        return $this;
+    }
 
-	/**
-	 * Get all of the files at a given path.
-	 *
-	 * @param  string  $path
-	 * @return array
-	 */
-	protected function getFiles($path)
-	{
-		if (isset($this->seeds)) return $this->seeds;
+    /**
+     * Run the given seeder class.
+     *
+     * @param  array|string  $class
+     * @param  array  $parameters
+     * @return void
+     */
+    public function callWith($class, array $parameters = [])
+    {
+        $this->call($class, false, $parameters);
+    }
 
-		// If the seeds haven't been read before, we will glob the directory and sort
-		// them alphabetically just in case the developer is using numbers to make
-		// the seed run in a certain order based on their database design needs.
-		$files = $this->files->glob($path.'/*.php');
+    /**
+     * Silently run the given seeder class.
+     *
+     * @param  array|string  $class
+     * @param  array  $parameters
+     * @return void
+     */
+    public function callSilent($class, array $parameters = [])
+    {
+        $this->call($class, true, $parameters);
+    }
 
-		sort($files);
+    /**
+     * Run the given seeder class once.
+     *
+     * @param  array|string  $class
+     * @param  bool  $silent
+     * @return void
+     */
+    public function callOnce($class, $silent = false, array $parameters = [])
+    {
+        if (in_array($class, static::$called)) {
+            return;
+        }
 
-		return $this->seeds = $files;
-	}
+        $this->call($class, $silent, $parameters);
+    }
 
-	/**
-	 * Get the table from the given records and file.
-	 *
-	 * @param  array   $records
-	 * @param  string  $file
-	 * @return string
-	 */
-	protected function getTable( & $records, $file)
-	{
-		$table = array_get($records, 'table', basename($file, '.php'));
+    /**
+     * Resolve an instance of the given seeder class.
+     *
+     * @param  string  $class
+     * @return \Illuminate\Database\Seeder
+     */
+    protected function resolve($class)
+    {
+        if (isset($this->container)) {
+            $instance = $this->container->make($class);
 
-		unset($records['table']);
+            $instance->setContainer($this->container);
+        } else {
+            $instance = new $class;
+        }
 
-		return $table;
-	}
+        if (isset($this->command)) {
+            $instance->setCommand($this->command);
+        }
 
+        return $instance;
+    }
+
+    /**
+     * Set the IoC container instance.
+     *
+     * @param  \Illuminate\Container\Container  $container
+     * @return $this
+     */
+    public function setContainer(Container $container)
+    {
+        $this->container = $container;
+
+        return $this;
+    }
+
+    /**
+     * Set the console command instance.
+     *
+     * @param  \Illuminate\Console\Command  $command
+     * @return $this
+     */
+    public function setCommand(Command $command)
+    {
+        $this->command = $command;
+
+        return $this;
+    }
+
+    /**
+     * Run the database seeds.
+     *
+     * @param  array  $parameters
+     * @return mixed
+     *
+     * @throws \InvalidArgumentException
+     */
+    public function __invoke(array $parameters = [])
+    {
+        if (! method_exists($this, 'run')) {
+            throw new InvalidArgumentException('Method [run] missing from '.get_class($this));
+        }
+
+        $callback = fn () => isset($this->container)
+            ? $this->container->call([$this, 'run'], $parameters)
+            : $this->run(...$parameters);
+
+        $uses = array_flip(class_uses_recursive(static::class));
+
+        if (isset($uses[WithoutModelEvents::class])) {
+            $callback = $this->withoutModelEvents($callback);
+        }
+
+        return $callback();
+    }
 }

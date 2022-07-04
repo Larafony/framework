@@ -1,147 +1,231 @@
-<?php namespace Illuminate\Queue;
+<?php
 
-use Illuminate\Queue\Jobs\Job;
+namespace Illuminate\Queue;
 
-class Listener {
+use Closure;
+use Symfony\Component\Process\PhpExecutableFinder;
+use Symfony\Component\Process\Process;
 
-	/**
-	 * THe queue manager instance.
-	 *
-	 * @var Illuminate\Queue\QueueManager
-	 */
-	protected $manager;
+class Listener
+{
+    /**
+     * The command working path.
+     *
+     * @var string
+     */
+    protected $commandPath;
 
-	/**
-	 * Create a new queue listener.
-	 *
-	 * @param  Illuminate\Queue\QueueManager  $manager
-	 * @return void
-	 */
-	public function __construct(QueueManager $manager)
-	{
-		$this->manager = $manager;
-	}
+    /**
+     * The environment the workers should run under.
+     *
+     * @var string
+     */
+    protected $environment;
 
-	/**
-	 * Listen to the given queue.
-	 *
-	 * @param  string  $connection
-	 * @param  string  $queue
-	 * @param  int     $delay
-	 * @param  int     $memory
-	 * @return void
-	 */
-	public function listen($connection, $queue = null, $delay = 0, $memory = 128)
-	{
-		$connection = $this->manager->connection($connection);
+    /**
+     * The amount of seconds to wait before polling the queue.
+     *
+     * @var int
+     */
+    protected $sleep = 3;
 
-		while (true)
-		{
-			$job = $connection->pop($queue);
+    /**
+     * The number of times to try a job before logging it failed.
+     *
+     * @var int
+     */
+    protected $maxTries = 0;
 
-			// If we're able to pull a job off of the stack, we will process it and
-			// then make sure we are not exceeding our memory limits for the run
-			// which is to protect against run-away memory leakages from here.
-			if ( ! is_null($job))
-			{
-				$this->process($job, $delay);
-			}
-			else
-			{
-				$this->sleep(1);
-			}
+    /**
+     * The output handler callback.
+     *
+     * @var \Closure|null
+     */
+    protected $outputHandler;
 
-			// Once we have run the job we'll go check if the memory limit has been
-			// exceeded for the script. If it has, we will kill this script so a
-			// process managers will restart this with a clean slate of memory.
-			if ($this->memoryExceeded($memory))
-			{
-				$this->stop(); return;
-			}
-		}
-	}
+    /**
+     * Create a new queue listener.
+     *
+     * @param  string  $commandPath
+     * @return void
+     */
+    public function __construct($commandPath)
+    {
+        $this->commandPath = $commandPath;
+    }
 
-	/**
-	 * Process a given job from the queue.
-	 *
-	 * @param  Illuminate\Queue\Jobs\Job  $job
-	 * @param  int  $delay
-	 * @return void
-	 */
-	public function process(Job $job, $delay)
-	{
-		try
-		{
-			// First we will fire off the job. Once it is done we will see if it will
-			// be auto-deleted after processing and if so we will go ahead and run
-			// the delete method on the job. Otherwise we will just keep moving.
-			$job->fire();
+    /**
+     * Get the PHP binary.
+     *
+     * @return string
+     */
+    protected function phpBinary()
+    {
+        return (new PhpExecutableFinder)->find(false);
+    }
 
-			if ($job->autoDelete()) $job->delete();
-		}
+    /**
+     * Get the Artisan binary.
+     *
+     * @return string
+     */
+    protected function artisanBinary()
+    {
+        return defined('ARTISAN_BINARY') ? ARTISAN_BINARY : 'artisan';
+    }
 
-		catch (\Exception $e)
-		{
-			// If we catch an exception, we will attempt to release the job back onto
-			// the queue so it is not lost. This will let is be retried at a later
-			// time by another listener (or the same one). We will do that here.
-			$job->release($delay);
+    /**
+     * Listen to the given queue connection.
+     *
+     * @param  string  $connection
+     * @param  string  $queue
+     * @param  \Illuminate\Queue\ListenerOptions  $options
+     * @return void
+     */
+    public function listen($connection, $queue, ListenerOptions $options)
+    {
+        $process = $this->makeProcess($connection, $queue, $options);
 
-			throw $e;
-		}
-	}
+        while (true) {
+            $this->runProcess($process, $options->memory);
+        }
+    }
 
-	/**
-	 * Determine if the memory limit has been exceeded.
-	 *
-	 * @param  int   $memoryLimit
-	 * @return bool
-	 */
-	public function memoryExceeded($memoryLimit)
-	{
-		return (memory_get_usage() / 1024 / 1024) >= $memoryLimit;
-	}
+    /**
+     * Create a new Symfony process for the worker.
+     *
+     * @param  string  $connection
+     * @param  string  $queue
+     * @param  \Illuminate\Queue\ListenerOptions  $options
+     * @return \Symfony\Component\Process\Process
+     */
+    public function makeProcess($connection, $queue, ListenerOptions $options)
+    {
+        $command = $this->createCommand(
+            $connection,
+            $queue,
+            $options
+        );
 
-	/**
-	 * Sleep the script for a given number of seconds.
-	 *
-	 * @param  int   $seconds
-	 * @return void
-	 */
-	public function sleep($seconds)
-	{
-		sleep($seconds);
-	}
+        // If the environment is set, we will append it to the command array so the
+        // workers will run under the specified environment. Otherwise, they will
+        // just run under the production environment which is not always right.
+        if (isset($options->environment)) {
+            $command = $this->addEnvironment($command, $options);
+        }
 
-	/**
-	 * Stop listening and bail out of the script.
-	 *
-	 * @return void
-	 */
-	public function stop()
-	{
-		die;
-	}
+        return new Process(
+            $command,
+            $this->commandPath,
+            null,
+            null,
+            $options->timeout
+        );
+    }
 
-	/**
-	 * Get the queue manager instance.
-	 *
-	 * @return Illuminate\Queue\QueueManager
-	 */
-	public function getManager()
-	{
-		return $this->manager;
-	}
+    /**
+     * Add the environment option to the given command.
+     *
+     * @param  array  $command
+     * @param  \Illuminate\Queue\ListenerOptions  $options
+     * @return array
+     */
+    protected function addEnvironment($command, ListenerOptions $options)
+    {
+        return array_merge($command, ["--env={$options->environment}"]);
+    }
 
-	/**
-	 * Set the queue manager instance.
-	 *
-	 * @param  Illuminate\Queue\QueueManager  $manager
-	 * @return void
-	 */
-	public function setManager(QueueManager $manager)
-	{
-		$this->manager = $manager;
-	}
+    /**
+     * Create the command with the listener options.
+     *
+     * @param  string  $connection
+     * @param  string  $queue
+     * @param  \Illuminate\Queue\ListenerOptions  $options
+     * @return array
+     */
+    protected function createCommand($connection, $queue, ListenerOptions $options)
+    {
+        return array_filter([
+            $this->phpBinary(),
+            $this->artisanBinary(),
+            'queue:work',
+            $connection,
+            '--once',
+            "--name={$options->name}",
+            "--queue={$queue}",
+            "--backoff={$options->backoff}",
+            "--memory={$options->memory}",
+            "--sleep={$options->sleep}",
+            "--tries={$options->maxTries}",
+        ], function ($value) {
+            return ! is_null($value);
+        });
+    }
 
+    /**
+     * Run the given process.
+     *
+     * @param  \Symfony\Component\Process\Process  $process
+     * @param  int  $memory
+     * @return void
+     */
+    public function runProcess(Process $process, $memory)
+    {
+        $process->run(function ($type, $line) {
+            $this->handleWorkerOutput($type, $line);
+        });
+
+        // Once we have run the job we'll go check if the memory limit has been exceeded
+        // for the script. If it has, we will kill this script so the process manager
+        // will restart this with a clean slate of memory automatically on exiting.
+        if ($this->memoryExceeded($memory)) {
+            $this->stop();
+        }
+    }
+
+    /**
+     * Handle output from the worker process.
+     *
+     * @param  int  $type
+     * @param  string  $line
+     * @return void
+     */
+    protected function handleWorkerOutput($type, $line)
+    {
+        if (isset($this->outputHandler)) {
+            call_user_func($this->outputHandler, $type, $line);
+        }
+    }
+
+    /**
+     * Determine if the memory limit has been exceeded.
+     *
+     * @param  int  $memoryLimit
+     * @return bool
+     */
+    public function memoryExceeded($memoryLimit)
+    {
+        return (memory_get_usage(true) / 1024 / 1024) >= $memoryLimit;
+    }
+
+    /**
+     * Stop listening and bail out of the script.
+     *
+     * @return void
+     */
+    public function stop()
+    {
+        exit;
+    }
+
+    /**
+     * Set the output handler callback.
+     *
+     * @param  \Closure  $outputHandler
+     * @return void
+     */
+    public function setOutputHandler(Closure $outputHandler)
+    {
+        $this->outputHandler = $outputHandler;
+    }
 }

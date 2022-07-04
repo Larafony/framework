@@ -1,222 +1,330 @@
-<?php namespace Illuminate\View;
+<?php
 
-use Illuminate\Filesystem;
+namespace Illuminate\View;
 
-class FileViewFinder implements ViewFinderInterface {
+use Illuminate\Filesystem\Filesystem;
+use InvalidArgumentException;
 
-	/**
-	 * The filesystem instance.
-	 *
-	 * @var Illuminate\Filesystem
-	 */
-	protected $files;
+class FileViewFinder implements ViewFinderInterface
+{
+    /**
+     * The filesystem instance.
+     *
+     * @var \Illuminate\Filesystem\Filesystem
+     */
+    protected $files;
 
-	/**
-	 * The array of active view paths.
-	 *
-	 * @var array
-	 */
-	protected $paths;
+    /**
+     * The array of active view paths.
+     *
+     * @var array
+     */
+    protected $paths;
 
-	/**
-	 * The namespace to file path hints.
-	 *
-	 * @var array
-	 */
-	protected $hints = array();
+    /**
+     * The array of views that have been located.
+     *
+     * @var array
+     */
+    protected $views = [];
 
-	/**
-	 * Register a view extension with the finder.
-	 *
-	 * @var array
-	 */
-	protected $extensions = array('php', 'blade.php');
+    /**
+     * The namespace to file path hints.
+     *
+     * @var array
+     */
+    protected $hints = [];
 
-	/**
-	 * Create a new file view loader instance.
-	 *
-	 * @param  Illuminate\Filesystem  $files
-	 * @param  array  $paths
-	 * @param  array  $extensions
-	 * @return void
-	 */
-	public function __construct(Filesystem $files, array $paths, array $extensions = null)
-	{
-		$this->files = $files;
-		$this->paths = $paths;
+    /**
+     * Register a view extension with the finder.
+     *
+     * @var string[]
+     */
+    protected $extensions = ['blade.php', 'php', 'css', 'html'];
 
-		if (isset($extensions))
-		{
-			$this->extensions = $extensions;
-		}
-	}
+    /**
+     * Create a new file view loader instance.
+     *
+     * @param  \Illuminate\Filesystem\Filesystem  $files
+     * @param  array  $paths
+     * @param  array|null  $extensions
+     * @return void
+     */
+    public function __construct(Filesystem $files, array $paths, array $extensions = null)
+    {
+        $this->files = $files;
+        $this->paths = array_map([$this, 'resolvePath'], $paths);
 
-	/**
-	 * Get the fully qualified location of the view.
-	 *
-	 * @param  string  $name
-	 * @return string
-	 */
-	public function find($name)
-	{
-		if (strpos($name, '::') !== false) return $this->findNamedPathView($name);
+        if (isset($extensions)) {
+            $this->extensions = $extensions;
+        }
+    }
 
-		return $this->findInPaths($name, $this->paths);
-	}
+    /**
+     * Get the fully qualified location of the view.
+     *
+     * @param  string  $name
+     * @return string
+     */
+    public function find($name)
+    {
+        if (isset($this->views[$name])) {
+            return $this->views[$name];
+        }
 
-	/**
-	 * Get the path to a template with a named path.
-	 *
-	 * @param  string  $name
-	 * @return string
-	 */
-	protected function findNamedPathView($name)
-	{
-		list($namespace, $view) = $this->getNamespaceSegments($name);
+        if ($this->hasHintInformation($name = trim($name))) {
+            return $this->views[$name] = $this->findNamespacedView($name);
+        }
 
-		return $this->findInPaths($view, $this->hints[$namespace]);
-	}
+        return $this->views[$name] = $this->findInPaths($name, $this->paths);
+    }
 
-	/**
-	 * Get the segments of a template with a named path.
-	 *
-	 * @param  string  $name
-	 * @return array
-	 */
-	protected function getNamespaceSegments($name)
-	{
-		$segments = explode('::', $name);
+    /**
+     * Get the path to a template with a named path.
+     *
+     * @param  string  $name
+     * @return string
+     */
+    protected function findNamespacedView($name)
+    {
+        [$namespace, $view] = $this->parseNamespaceSegments($name);
 
-		if (count($segments) != 2)
-		{
-			throw new \InvalidArgumentException("View [$name] has an invalid name.");
-		}
+        return $this->findInPaths($view, $this->hints[$namespace]);
+    }
 
-		if ( ! isset($this->hints[$segments[0]]))
-		{
-			throw new \InvalidArgumentException("No hint path defined for [{$segments[0]}].");
-		}
+    /**
+     * Get the segments of a template with a named path.
+     *
+     * @param  string  $name
+     * @return array
+     *
+     * @throws \InvalidArgumentException
+     */
+    protected function parseNamespaceSegments($name)
+    {
+        $segments = explode(static::HINT_PATH_DELIMITER, $name);
 
-		return $segments;
-	}
+        if (count($segments) !== 2) {
+            throw new InvalidArgumentException("View [{$name}] has an invalid name.");
+        }
 
-	/**
-	 * Find the given view in the list of paths.
-	 *
-	 * @param  string  $name
-	 * @param  array   $paths
-	 * @return string
-	 */
-	protected function findInPaths($name, $paths)
-	{
-		foreach ((array) $paths as $path)
-		{
-			foreach ($this->getPossibleViewFiles($name) as $file)
-			{
-				if ($this->files->exists($viewPath = $path.'/'.$file))
-				{
-					return $viewPath;
-				}
-			}
-		}
+        if (! isset($this->hints[$segments[0]])) {
+            throw new InvalidArgumentException("No hint path defined for [{$segments[0]}].");
+        }
 
-		throw new \InvalidArgumentException("View [$name] not found.");
-	}
+        return $segments;
+    }
 
-	/**
-	 * Get an array of possible view files.
-	 *
-	 * @param  string  $name
-	 * @return array
-	 */
-	protected function getPossibleViewFiles($name)
-	{
-		return array_map(function($extension) use ($name)
-		{
-			return str_replace('.', '/', $name).'.'.$extension;
+    /**
+     * Find the given view in the list of paths.
+     *
+     * @param  string  $name
+     * @param  array  $paths
+     * @return string
+     *
+     * @throws \InvalidArgumentException
+     */
+    protected function findInPaths($name, $paths)
+    {
+        foreach ((array) $paths as $path) {
+            foreach ($this->getPossibleViewFiles($name) as $file) {
+                if ($this->files->exists($viewPath = $path.'/'.$file)) {
+                    return $viewPath;
+                }
+            }
+        }
 
-		}, $this->extensions);
-	}
+        throw new InvalidArgumentException("View [{$name}] not found.");
+    }
 
-	/**
-	 * Add a location to the finder.
-	 *
-	 * @param  string  $location
-	 * @return void
-	 */
-	public function addLocation($location)
-	{
-		$this->paths[] = $location;
-	}
+    /**
+     * Get an array of possible view files.
+     *
+     * @param  string  $name
+     * @return array
+     */
+    protected function getPossibleViewFiles($name)
+    {
+        return array_map(fn ($extension) => str_replace('.', '/', $name).'.'.$extension, $this->extensions);
+    }
 
-	/**
-	 * Add a namespace hint to the finder.
-	 *
-	 * @param  string  $namespace
-	 * @param  string|array  $hints
-	 * @return void
-	 */
-	public function addNamespace($namespace, $hints)
-	{
-		$hints = (array) $hints;
+    /**
+     * Add a location to the finder.
+     *
+     * @param  string  $location
+     * @return void
+     */
+    public function addLocation($location)
+    {
+        $this->paths[] = $this->resolvePath($location);
+    }
 
-		if (isset($this->hints[$namespace]))
-		{
-			$hints = array_merge($this->hints[$namespace], $hints);
-		}
+    /**
+     * Prepend a location to the finder.
+     *
+     * @param  string  $location
+     * @return void
+     */
+    public function prependLocation($location)
+    {
+        array_unshift($this->paths, $this->resolvePath($location));
+    }
 
-		$this->hints[$namespace] = $hints;
-	}
+    /**
+     * Resolve the path.
+     *
+     * @param  string  $path
+     * @return string
+     */
+    protected function resolvePath($path)
+    {
+        return realpath($path) ?: $path;
+    }
 
-	/**
-	 * Register an extension with the view finder.
-	 *
-	 * @param  string  $extension
-	 * @return void
-	 */
-	public function addExtension($extension)
-	{
-		$this->extensions[] = $extension;
-	}
+    /**
+     * Add a namespace hint to the finder.
+     *
+     * @param  string  $namespace
+     * @param  string|array  $hints
+     * @return void
+     */
+    public function addNamespace($namespace, $hints)
+    {
+        $hints = (array) $hints;
 
-	/**
-	 * Get the filesystem instance.
-	 *
-	 * @return Illuminate\Filesystem
-	 */
-	public function getFilesystem()
-	{
-		return $this->files;
-	}
+        if (isset($this->hints[$namespace])) {
+            $hints = array_merge($this->hints[$namespace], $hints);
+        }
 
-	/**
-	 * Get the active view paths.
-	 *
-	 * @return array
-	 */
-	public function getPaths()
-	{
-		return $this->paths;
-	}
+        $this->hints[$namespace] = $hints;
+    }
 
-	/**
-	 * Get the namespace to file path hints.
-	 *
-	 * @return array
-	 */
-	public function getHints()
-	{
-		return $this->hints;
-	}
+    /**
+     * Prepend a namespace hint to the finder.
+     *
+     * @param  string  $namespace
+     * @param  string|array  $hints
+     * @return void
+     */
+    public function prependNamespace($namespace, $hints)
+    {
+        $hints = (array) $hints;
 
-	/**
-	 * Get registered extensions.
-	 *
-	 * @return array
-	 */
-	public function getExtensions()
-	{
-		return $this->extensions;
-	}
+        if (isset($this->hints[$namespace])) {
+            $hints = array_merge($hints, $this->hints[$namespace]);
+        }
 
+        $this->hints[$namespace] = $hints;
+    }
+
+    /**
+     * Replace the namespace hints for the given namespace.
+     *
+     * @param  string  $namespace
+     * @param  string|array  $hints
+     * @return void
+     */
+    public function replaceNamespace($namespace, $hints)
+    {
+        $this->hints[$namespace] = (array) $hints;
+    }
+
+    /**
+     * Register an extension with the view finder.
+     *
+     * @param  string  $extension
+     * @return void
+     */
+    public function addExtension($extension)
+    {
+        if (($index = array_search($extension, $this->extensions)) !== false) {
+            unset($this->extensions[$index]);
+        }
+
+        array_unshift($this->extensions, $extension);
+    }
+
+    /**
+     * Returns whether or not the view name has any hint information.
+     *
+     * @param  string  $name
+     * @return bool
+     */
+    public function hasHintInformation($name)
+    {
+        return strpos($name, static::HINT_PATH_DELIMITER) > 0;
+    }
+
+    /**
+     * Flush the cache of located views.
+     *
+     * @return void
+     */
+    public function flush()
+    {
+        $this->views = [];
+    }
+
+    /**
+     * Get the filesystem instance.
+     *
+     * @return \Illuminate\Filesystem\Filesystem
+     */
+    public function getFilesystem()
+    {
+        return $this->files;
+    }
+
+    /**
+     * Set the active view paths.
+     *
+     * @param  array  $paths
+     * @return $this
+     */
+    public function setPaths($paths)
+    {
+        $this->paths = $paths;
+
+        return $this;
+    }
+
+    /**
+     * Get the active view paths.
+     *
+     * @return array
+     */
+    public function getPaths()
+    {
+        return $this->paths;
+    }
+
+    /**
+     * Get the views that have been located.
+     *
+     * @return array
+     */
+    public function getViews()
+    {
+        return $this->views;
+    }
+
+    /**
+     * Get the namespace to file path hints.
+     *
+     * @return array
+     */
+    public function getHints()
+    {
+        return $this->hints;
+    }
+
+    /**
+     * Get registered extensions.
+     *
+     * @return array
+     */
+    public function getExtensions()
+    {
+        return $this->extensions;
+    }
 }
